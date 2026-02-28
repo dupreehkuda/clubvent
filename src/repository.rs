@@ -19,7 +19,6 @@ pub trait Repository {
         req: EventSuggestionsRequest,
     ) -> Result<EventSuggestionsResponse, Error>;
     async fn write_picked_subject(&self, req: PickedSubjectRequest) -> Result<(), Error>;
-    async fn toggle_with_insights(&self, req: EventToggleWithInsightsRequest) -> Result<(), Error>;
 }
 
 pub struct Postgres {
@@ -49,7 +48,7 @@ impl Repository for Postgres {
         let tx = conn.transaction().await.unwrap();
 
         tx.execute(
-            "INSERT INTO events (id, chat_id, event_date, active) VALUES ($1, $2, $3, true);",
+            "INSERT INTO events (id, chat_id, event_date, active, insights) VALUES ($1, $2, $3, true, true);",
             &[&req.event_id, &req.chat_id, &req.event_date.and_utc()],
         )
         .await?;
@@ -165,27 +164,4 @@ impl Repository for Postgres {
         result.map(|_| ())
     }
 
-    async fn toggle_with_insights(&self, req: EventToggleWithInsightsRequest) -> Result<(), Error> {
-        let conn = self.pool.get().await.unwrap();
-
-        if req.with_insights {
-            let result = conn
-                .execute(
-                    "UPDATE events SET insights = false WHERE id = $1",
-                    &[&req.event_id],
-                )
-                .await;
-
-            result.map(|_| ())
-        } else {
-            let result = conn
-                .execute(
-                    "UPDATE events SET insights = true WHERE id = $1",
-                    &[&req.event_id],
-                )
-                .await;
-
-            result.map(|_| ())
-        }
-    }
 }

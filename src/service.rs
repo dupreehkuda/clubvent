@@ -94,35 +94,8 @@ impl Service {
         Ok(())
     }
 
-    pub async fn toggle_with_insights(&self, chat_id: i64) -> Result<String, Box<dyn Error>> {
-        let latest_event = self
-            .repository
-            .get_latest_event(LastEventRequest { chat_id })
-            .await
-            .unwrap();
-
-        if latest_event.event_id.is_nil() {
-            return Err(Box::new(Err::NoActiveEventFound));
-        }
-
-        if !latest_event.subject.is_empty() {
-            return Ok("Unable to toggle insights because subject is already picked".to_string());
-        }
-
-        self.repository
-            .toggle_with_insights(EventToggleWithInsightsRequest {
-                event_id: latest_event.event_id,
-                with_insights: latest_event.with_insights,
-            })
-            .await?;
-
-        if latest_event.with_insights {
-            return Ok("Turned off insights for current event".to_string());
-        } else if !latest_event.with_insights {
-            return Ok("Turned on insights for current event".to_string());
-        }
-
-        Ok("Unable to toggle insights".to_string())
+    pub async fn toggle_with_insights(&self, _chat_id: i64) -> Result<String, Box<dyn Error>> {
+        Ok("Insights are on by default for every event".to_string())
     }
 
     // start_active_event needed only to stop accepting new insights and get summary link

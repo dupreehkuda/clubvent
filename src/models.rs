@@ -40,10 +40,6 @@ pub struct EventSuggestionsRequest {
     pub event_id: Uuid,
 }
 
-pub struct EventToggleWithInsightsRequest {
-    pub event_id: Uuid,
-    pub with_insights: bool,
-}
 
 pub struct EventSuggestionsResponse {
     pub suggestions: Vec<String>,
