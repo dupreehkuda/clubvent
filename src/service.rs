@@ -86,7 +86,7 @@ impl Service {
                 event_id: latest_event.event_id,
                 chat_id,
                 user_id,
-                suggestion: escape_hyphen(suggestion).to_string(),
+                suggestion: escape_markdown_v2(suggestion),
             })
             .await
             .unwrap();
@@ -231,7 +231,7 @@ impl Service {
             .insights
             .register_event(RegisterEventRequest {
                 event_id: latest_event.event_id,
-                event_subject: unescape_hyphen(result.unwrap()),
+                event_subject: unescape_markdown_v2(result.unwrap()),
                 club_id: chat_id,
             })
             .await
@@ -268,7 +268,7 @@ impl Service {
 
         if latest_event.subject.is_empty() {
             return Ok(format!(
-                "The next event is on {}.\nThe subject hasn't been picked yet",
+                "The next event is on {}\\.\nThe subject hasn't been picked yet",
                 formatted_date,
             ));
         }
@@ -303,12 +303,40 @@ pub async fn default_service() -> Service {
     }
 }
 
-fn escape_hyphen(text: &str) -> String {
-    text.replace("-", "\\-")
+fn escape_markdown_v2(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() * 2);
+    for ch in text.chars() {
+        match ch {
+            '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '='
+            | '|' | '{' | '}' | '.' | '!' | '\\' => {
+                result.push('\\');
+                result.push(ch);
+            }
+            _ => result.push(ch),
+        }
+    }
+    result
 }
 
-fn unescape_hyphen(text: &str) -> String {
-    text.replace("\\-", "-")
+fn unescape_markdown_v2(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(&next) = chars.peek() {
+                match next {
+                    '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-'
+                    | '=' | '|' | '{' | '}' | '.' | '!' | '\\' => {
+                        result.push(chars.next().unwrap());
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        result.push(ch);
+    }
+    result
 }
 
 fn beautify_date(ts: NaiveDateTime) -> String {
