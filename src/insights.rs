@@ -1,7 +1,7 @@
+use crate::err::AppError;
 use crate::models::{
     ManageEventRequest, RegisterEventRequest, RegisterEventResponse, StartEventResponse,
 };
-use std::error::Error;
 use uuid::Uuid;
 
 pub struct InsightsClient {
@@ -17,64 +17,53 @@ pub fn new(address: String) -> InsightsClient {
 }
 
 impl InsightsClient {
-    pub async fn register_event(
-        &self,
-        req: RegisterEventRequest,
-    ) -> Result<String, Box<dyn Error>> {
+    pub async fn register_event(&self, req: RegisterEventRequest) -> Result<String, AppError> {
         let response = self
             .client
-            .post(format!("{}/api/v1/event/register", self.address.clone()))
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_string(&req).unwrap())
+            .post(format!("{}/api/v1/event/register", self.address))
+            .json(&req)
             .send()
             .await?;
 
         match response.status() {
-            reqwest::StatusCode::OK => match response.json::<RegisterEventResponse>().await {
-                Ok(parsed) => Ok(parsed.insights_link),
-                Err(_) => Err(Box::<dyn Error>::from("cannot parse body")),
-            },
-            _ => Err(Box::<dyn Error>::from("smth went wrong")),
+            reqwest::StatusCode::OK => Ok(response
+                .json::<RegisterEventResponse>()
+                .await
+                .map_err(|_| "insights: cannot parse register response")?
+                .insights_link),
+            status => Err(format!("insights: register failed with {}", status).into()),
         }
     }
 
-    pub async fn start_event(&self, event_id: Uuid) -> Result<String, Box<dyn Error>> {
-        let request = serde_json::to_string(&ManageEventRequest { event_id }).unwrap();
-
+    pub async fn start_event(&self, event_id: Uuid) -> Result<String, AppError> {
         let response = self
             .client
-            .post(format!("{}/api/v1/event/start", self.address.clone()))
-            .header("Content-Type", "application/json")
-            .body(request)
+            .post(format!("{}/api/v1/event/start", self.address))
+            .json(&ManageEventRequest { event_id })
             .send()
             .await?;
 
         match response.status() {
-            reqwest::StatusCode::OK => match response.json::<StartEventResponse>().await {
-                Ok(parsed) => Ok(parsed.summary_link),
-                Err(_) => Err(Box::<dyn Error>::from("cannot parse body")),
-            },
-            _ => Err(Box::<dyn Error>::from(format!(
-                "smth went wrong: {}",
-                response.status()
-            ))),
+            reqwest::StatusCode::OK => Ok(response
+                .json::<StartEventResponse>()
+                .await
+                .map_err(|_| "insights: cannot parse start response")?
+                .summary_link),
+            status => Err(format!("insights: start failed with {}", status).into()),
         }
     }
 
-    pub async fn finish_event(&self, event_id: Uuid) -> Result<(), Box<dyn Error>> {
-        let request = serde_json::to_string(&ManageEventRequest { event_id }).unwrap();
-
+    pub async fn finish_event(&self, event_id: Uuid) -> Result<(), AppError> {
         let response = self
             .client
-            .post(format!("{}/api/v1/event/finish", self.address.clone()))
-            .header("Content-Type", "application/json")
-            .body(request)
+            .post(format!("{}/api/v1/event/finish", self.address))
+            .json(&ManageEventRequest { event_id })
             .send()
             .await?;
 
         match response.status() {
             reqwest::StatusCode::OK => Ok(()),
-            _ => Err(Box::<dyn Error>::from("smth went wrong")),
+            status => Err(format!("insights: finish failed with {}", status).into()),
         }
     }
 }

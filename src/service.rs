@@ -1,4 +1,4 @@
-use crate::err::CustomError as Err;
+use crate::err::{AppError, CustomError as Err};
 use crate::insights;
 use crate::insights::InsightsClient;
 use crate::models::*;
@@ -6,7 +6,6 @@ use crate::repository::{new_postgres_repository, Postgres, Repository};
 use chrono::prelude::*;
 use rand::seq::SliceRandom;
 use std::env;
-use std::error::Error;
 
 pub struct Service {
     repository: Postgres,
@@ -14,71 +13,60 @@ pub struct Service {
 }
 
 impl Service {
-    pub async fn register_new_club(&self, chat_id: i64) -> Result<(), Box<dyn Error>> {
+    pub async fn register_new_club(&self, chat_id: i64) -> Result<(), AppError> {
         self.repository
             .register_new_club(NewClubRequest { chat_id })
             .await
-            .map_err(|err| Box::new(err) as Box<dyn Error>)
     }
 
-    pub async fn new_club_event(&self, chat_id: i64, date: &str) -> Result<String, Box<dyn Error>> {
-        let dt = Utc.datetime_from_str(date, "%Y.%m.%d %H:%M");
-        match dt {
-            Ok(_) => {}
-            Err(_) => return Err(Box::new(Err::WrongDateFormat)),
+    pub async fn new_club_event(&self, chat_id: i64, date: &str) -> Result<String, AppError> {
+        let dt = Utc
+            .datetime_from_str(date, "%Y.%m.%d %H:%M")
+            .map_err(|_| Err::WrongDateFormat)?;
+
+        if dt <= Utc::now() {
+            return Err(Err::EventInPast.into());
         }
 
-        if dt.unwrap().le(&Utc::now()) {
-            return Err(Box::new(Err::EventInPast));
-        }
-
-        let event_date = NaiveDateTime::from_timestamp_opt(dt.unwrap().timestamp(), 0).unwrap();
+        let event_date = dt.naive_utc();
 
         let latest_event = self
             .repository
             .get_latest_event(LastEventRequest { chat_id })
-            .await
-            .unwrap();
+            .await?;
 
         if !latest_event.event_id.is_nil() {
-            return Err(Box::new(Err::ActiveEventFound(
-                latest_event.event_date.to_string(),
-            )));
+            return Err(Err::ActiveEventFound(beautify_date(latest_event.event_date)).into());
         }
 
-        let event_id = uuid::Uuid::new_v4();
-
-        let resp = self
-            .repository
+        self.repository
             .write_new_event(NewEventRequest {
                 chat_id,
-                event_id,
+                event_id: uuid::Uuid::new_v4(),
                 event_date,
             })
-            .await;
+            .await?;
 
-        resp.unwrap();
         Ok(beautify_date(event_date))
     }
 
     pub async fn new_member_suggestion(
         &self,
         chat_id: i64,
-        user_id: u32,
+        user_id: u64,
         suggestion: &str,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), AppError> {
         let latest_event = self
             .repository
             .get_latest_event(LastEventRequest { chat_id })
-            .await
-            .unwrap();
+            .await?;
 
         if latest_event.event_id.is_nil() {
-            return Err(Box::new(Err::NoActiveEventFound));
+            return Err(Err::NoActiveEventFound.into());
         }
 
         if !latest_event.subject.is_empty() {
-            return Err(Box::new(Err::AlreadyPickedSubject(latest_event.subject)));
+            return Err(Err::AlreadyPickedSubject(stored_text(&latest_event.subject)).into());
         }
 
         self.repository
@@ -86,55 +74,46 @@ impl Service {
                 event_id: latest_event.event_id,
                 chat_id,
                 user_id,
-                suggestion: escape_markdown_v2(suggestion),
+                suggestion: suggestion.to_string(),
             })
             .await
-            .unwrap();
-
-        Ok(())
     }
 
-    pub async fn toggle_with_insights(&self, _chat_id: i64) -> Result<String, Box<dyn Error>> {
+    pub async fn toggle_with_insights(&self, _chat_id: i64) -> Result<String, AppError> {
         Ok("Insights are on by default for every event".to_string())
     }
 
     // start_active_event needed only to stop accepting new insights and get summary link
-    pub async fn start_active_event(&self, chat_id: i64) -> Result<String, Box<dyn Error>> {
+    pub async fn start_active_event(&self, chat_id: i64) -> Result<String, AppError> {
         let latest_event = self
             .repository
             .get_latest_event(LastEventRequest { chat_id })
-            .await
-            .unwrap();
+            .await?;
 
         if latest_event.event_id.is_nil() {
-            return Err(Box::new(Err::NoActiveEventFound));
+            return Err(Err::NoActiveEventFound.into());
         }
 
         if !latest_event.with_insights {
-            return Err(Box::new(Err::EventWithoutInsights));
+            return Err(Err::EventWithoutInsights.into());
         }
 
-        let summary_link = self
-            .insights
-            .start_event(latest_event.event_id)
-            .await
-            .unwrap();
+        let summary_link = self.insights.start_event(latest_event.event_id).await?;
 
         Ok(format!(
             "Here is your [insights summary]({})\\.\nHave a great club\\!",
-            summary_link,
+            escape_link_url(&summary_link),
         ))
     }
 
-    pub async fn achieve_active_event(&self, chat_id: i64) -> Result<String, Box<dyn Error>> {
+    pub async fn achieve_active_event(&self, chat_id: i64) -> Result<String, AppError> {
         let latest_event = self
             .repository
             .get_latest_event(LastEventRequest { chat_id })
-            .await
-            .unwrap();
+            .await?;
 
         if latest_event.event_id.is_nil() {
-            return Err(Box::new(Err::NoActiveEventFound));
+            return Err(Err::NoActiveEventFound.into());
         }
 
         self.repository
@@ -142,34 +121,30 @@ impl Service {
                 chat_id,
                 event_id: latest_event.event_id,
             })
-            .await
-            .unwrap();
+            .await?;
 
+        // the event is archived locally already; a failing insights call must not undo that
         if latest_event.with_insights && !latest_event.subject.is_empty() {
-            self.insights
-                .finish_event(latest_event.event_id)
-                .await
-                .unwrap();
+            if let Err(err) = self.insights.finish_event(latest_event.event_id).await {
+                log::error!("finish insights for {}: {}", latest_event.event_id, err);
+            }
         }
 
-        let formatted_date = beautify_date(latest_event.event_date);
-
-        Ok(formatted_date)
+        Ok(beautify_date(latest_event.event_date))
     }
 
-    pub async fn pick_from_suggestions(&self, chat_id: i64) -> Result<String, Box<dyn Error>> {
+    pub async fn pick_from_suggestions(&self, chat_id: i64) -> Result<String, AppError> {
         let latest_event = self
             .repository
             .get_latest_event(LastEventRequest { chat_id })
-            .await
-            .unwrap();
+            .await?;
 
         if latest_event.event_id.is_nil() {
-            return Err(Box::new(Err::NoActiveEventFound));
+            return Err(Err::NoActiveEventFound.into());
         }
 
         if !latest_event.subject.is_empty() {
-            return Err(Box::new(Err::AlreadyPickedSubject(latest_event.subject)));
+            return Err(Err::AlreadyPickedSubject(stored_text(&latest_event.subject)).into());
         }
 
         let suggestions = self
@@ -177,64 +152,58 @@ impl Service {
             .get_all_suggestions_for_event(EventSuggestionsRequest {
                 event_id: latest_event.event_id,
             })
-            .await
-            .unwrap()
+            .await?
             .suggestions;
 
-        if suggestions.is_empty() {
-            return Err(Box::new(Err::NoSuggestionsFound));
-        }
-
-        let result = suggestions.choose(&mut rand::thread_rng());
+        let picked = match suggestions.choose(&mut rand::thread_rng()) {
+            Some(s) => stored_text(s),
+            None => return Err(Err::NoSuggestionsFound.into()),
+        };
 
         if !latest_event.with_insights {
             self.repository
                 .write_picked_subject(PickedSubjectRequest {
                     event_id: latest_event.event_id,
-                    subject: result.unwrap().to_string(),
+                    subject: picked.clone(),
                     insights_link: None,
                 })
-                .await
-                .unwrap();
+                .await?;
 
-            return Ok(format!("Randomly picked\n{}", result.unwrap()));
+            return Ok(format!("Randomly picked\n{}", escape_markdown_v2(&picked)));
         }
 
         let insights_link = self
             .insights
             .register_event(RegisterEventRequest {
                 event_id: latest_event.event_id,
-                event_subject: unescape_markdown_v2(result.unwrap()),
+                event_subject: picked.clone(),
                 club_id: chat_id,
             })
-            .await
-            .unwrap();
+            .await?;
 
         self.repository
             .write_picked_subject(PickedSubjectRequest {
                 event_id: latest_event.event_id,
-                subject: result.unwrap().to_string(),
+                subject: picked.clone(),
                 insights_link: Some(insights_link.clone()),
             })
-            .await
-            .unwrap();
+            .await?;
 
         Ok(format!(
             "Randomly picked\n{}\n\nAnd here is your [insights link]({})",
-            result.unwrap(),
-            insights_link,
+            escape_markdown_v2(&picked),
+            escape_link_url(&insights_link),
         ))
     }
 
-    pub async fn get_current_event_info(&self, chat_id: i64) -> Result<String, Box<dyn Error>> {
+    pub async fn get_current_event_info(&self, chat_id: i64) -> Result<String, AppError> {
         let latest_event = self
             .repository
             .get_latest_event(LastEventRequest { chat_id })
-            .await
-            .unwrap();
+            .await?;
 
         if latest_event.event_id.is_nil() {
-            return Err(Box::new(Err::NoActiveEventFound));
+            return Err(Err::NoActiveEventFound.into());
         }
 
         let formatted_date = beautify_date(latest_event.event_date);
@@ -248,14 +217,18 @@ impl Service {
 
         let mut message = format!(
             "The next event is on {}\\.\nThe subject is \\- {}",
-            formatted_date, latest_event.subject
+            formatted_date,
+            escape_markdown_v2(&stored_text(&latest_event.subject))
         );
 
-        if latest_event.with_insights {
+        if let Some(link) = latest_event
+            .insights_link
+            .filter(|_| latest_event.with_insights)
+        {
             message = format!(
                 "{}\nHere is the [insights link]({})",
                 message,
-                latest_event.insights_link.unwrap()
+                escape_link_url(&link)
             )
         }
 
@@ -263,25 +236,32 @@ impl Service {
     }
 }
 
-pub async fn default_service() -> Service {
-    let dsn = env::var("DB_DSN").unwrap();
-    let repo = new_postgres_repository(dsn.as_str()).await;
+pub async fn default_service() -> Result<Service, AppError> {
+    let dsn = env::var("DB_DSN")?;
+    let repository = new_postgres_repository(dsn.as_str()).await?;
 
-    let address = env::var("INSIGHTS_ADDRESS").unwrap();
+    let address = env::var("INSIGHTS_ADDRESS")?;
     let insights = insights::new(address);
 
-    Service {
-        repository: repo.unwrap(),
+    Ok(Service {
+        repository,
         insights,
-    }
+    })
+}
+
+/// Text is stored raw. Rows written before September 2026 were stored already
+/// MarkdownV2-escaped, so unescape on read; for raw text this is a no-op.
+// ponytail: drop once no active events from before that date are left
+fn stored_text(text: &str) -> String {
+    unescape_markdown_v2(text)
 }
 
 fn escape_markdown_v2(text: &str) -> String {
     let mut result = String::with_capacity(text.len() * 2);
     for ch in text.chars() {
         match ch {
-            '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '='
-            | '|' | '{' | '}' | '.' | '!' | '\\' => {
+            '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '=' | '|'
+            | '{' | '}' | '.' | '!' | '\\' => {
                 result.push('\\');
                 result.push(ch);
             }
@@ -291,20 +271,24 @@ fn escape_markdown_v2(text: &str) -> String {
     result
 }
 
+/// Inside the `(...)` part of an inline link only `)` and `\` are reserved.
+fn escape_link_url(url: &str) -> String {
+    url.replace('\\', "\\\\").replace(')', "\\)")
+}
+
 fn unescape_markdown_v2(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
-            if let Some(&next) = chars.peek() {
-                match next {
-                    '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-'
-                    | '=' | '|' | '{' | '}' | '.' | '!' | '\\' => {
-                        result.push(chars.next().unwrap());
-                        continue;
-                    }
-                    _ => {}
-                }
+            if let Some(
+                next @ ('_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '='
+                | '|' | '{' | '}' | '.' | '!' | '\\'),
+            ) = chars.peek().copied()
+            {
+                result.push(next);
+                chars.next();
+                continue;
             }
         }
         result.push(ch);
@@ -328,3 +312,7 @@ fn beautify_date(ts: NaiveDateTime) -> String {
         ts.format("%H:%M")
     )
 }
+
+#[cfg(test)]
+#[path = "service_tests.rs"]
+mod tests;

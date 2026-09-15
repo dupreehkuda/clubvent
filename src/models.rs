@@ -32,14 +32,13 @@ pub struct LastEventResponse {
 pub struct NewMemberSuggestion {
     pub event_id: Uuid,
     pub chat_id: i64,
-    pub user_id: u32,
+    pub user_id: u64,
     pub suggestion: String,
 }
 
 pub struct EventSuggestionsRequest {
     pub event_id: Uuid,
 }
-
 
 pub struct EventSuggestionsResponse {
     pub suggestions: Vec<String>,

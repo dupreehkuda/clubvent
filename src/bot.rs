@@ -1,4 +1,4 @@
-use crate::err::CustomError as Err;
+use crate::err::{AppError, CustomError as Err};
 use crate::service::{default_service, Service};
 use dotenv::dotenv;
 use lazy_static::lazy_static;
@@ -35,160 +35,142 @@ enum Command {
 
 fn default_service_blocking() -> Service {
     let rt = Handle::current();
-    tokio::task::block_in_place(|| rt.block_on(default_service()))
+    tokio::task::block_in_place(|| rt.block_on(default_service())).expect("service init")
 }
 
 lazy_static! {
     static ref SERVICE: Service = default_service_blocking();
 }
 
-async fn command_handler(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
-    let mut message: String;
-
-    match cmd {
-        Command::Help => {
-            bot.send_message(msg.chat.id, Command::descriptions().to_string())
-                .disable_notification(true)
-                .await?
+/// Domain errors are shown as they are; anything else is logged and hidden behind a generic text.
+fn user_message(err: &AppError) -> String {
+    match err.downcast_ref::<Err>() {
+        Some(domain) => domain.to_string(),
+        None => {
+            log::error!("{}", err);
+            "Something went wrong, please try again later".to_string()
         }
-        Command::Start => {
-            message = "You're all set up! Now you can create event for your club".to_string();
+    }
+}
 
-            if let Err(err) = SERVICE.register_new_club(msg.chat.id.0).await {
-                let db_err = err.downcast_ref::<tokio_postgres::Error>().unwrap();
-                if db_err.code().unwrap() == &SqlState::UNIQUE_VIOLATION {
-                    message = "You're already started a club".to_string();
-                }
-            }
+/// Plain-text reply for both outcomes.
+async fn reply(bot: &Bot, msg: &Message, result: Result<String, AppError>) -> ResponseResult<()> {
+    let text = result.unwrap_or_else(|err| user_message(&err));
+    bot.send_message(msg.chat.id, text)
+        .disable_notification(true)
+        .await?;
+    Ok(())
+}
 
-            bot.send_message(msg.chat.id, message)
-                .disable_notification(true)
-                .await?
-        }
-        Command::Event(date) => {
-            if date.is_empty() {
-                bot.send_message(
-                    msg.chat.id,
-                    "Please write a date in format -\n/event 2023.07.16 15:00".to_string(),
-                )
-                .await?;
-
-                return Ok(());
-            }
-
-            match SERVICE.new_club_event(msg.chat.id.0, date.as_str()).await {
-                Ok(date) => message = format!("New club event created on {}", date),
-                Err(err) => {
-                    let er = err.downcast_ref::<Err>().unwrap();
-                    message = er.to_string()
-                }
-            }
-
-            bot.send_message(msg.chat.id, message)
-                .disable_notification(true)
-                .await?
-        }
-        Command::Suggest(suggestion) => {
-            if suggestion.is_empty() {
-                bot.send_message(
-                    msg.chat.id,
-                    "Your suggestion is empty ;(\nFormat - /suggest smth".to_string(),
-                )
-                .await?;
-
-                return Ok(());
-            }
-
-            message = format!("Got it. Your suggestion:\n{}", suggestion);
-
-            if let Err(err) = SERVICE
-                .new_member_suggestion(
-                    msg.chat.id.0,
-                    msg.from().unwrap().id.0 as u32,
-                    suggestion.as_str(),
-                )
-                .await
-            {
-                let er = err.downcast_ref::<Err>().unwrap();
-                message = er.to_string()
-            }
-
-            bot.send_message(msg.chat.id, message)
-                .disable_notification(true)
-                .await?
-        }
-        Command::Insights => {
-            match SERVICE.toggle_with_insights(msg.chat.id.0).await {
-                Ok(text) => message = text,
-                Err(err) => {
-                    let er = err.downcast_ref::<Err>().unwrap();
-                    message = er.to_string()
-                }
-            }
-
-            bot.send_message(msg.chat.id, message)
-                .disable_notification(true)
-                .await?
-        }
-        Command::StartClub => {
-            match SERVICE.start_active_event(msg.chat.id.0).await {
-                Ok(text) => message = text,
-                Err(err) => {
-                    let er = err.downcast_ref::<Err>().unwrap();
-                    message = er.to_string()
-                }
-            }
-
-            bot.send_message(msg.chat.id, message)
+/// Success is pre-escaped MarkdownV2, errors are plain text so their content can never break parsing.
+async fn reply_markdown(
+    bot: &Bot,
+    msg: &Message,
+    result: Result<String, AppError>,
+) -> ResponseResult<()> {
+    match result {
+        Ok(text) => {
+            bot.send_message(msg.chat.id, text)
                 .parse_mode(MarkdownV2)
-                .disable_notification(true)
-                .await?
-        }
-        Command::Achieve => {
-            match SERVICE.achieve_active_event(msg.chat.id.0).await {
-                Ok(date) => message = format!("Ok, event on {} is achieved", date),
-                Err(err) => {
-                    let er = err.downcast_ref::<Err>().unwrap();
-                    message = er.to_string()
-                }
-            }
-
-            bot.send_message(msg.chat.id, message)
-                .disable_notification(true)
-                .await?
-        }
-        Command::Pick => {
-            match SERVICE.pick_from_suggestions(msg.chat.id.0).await {
-                Ok(text) => message = text,
-                Err(err) => {
-                    let er = err.downcast_ref::<Err>().unwrap();
-                    message = er.to_string()
-                }
-            }
-
-            bot.send_message(msg.chat.id, message)
                 .disable_web_page_preview(true)
                 .disable_notification(true)
-                .parse_mode(MarkdownV2)
                 .await?
         }
-        Command::Current => {
-            match SERVICE.get_current_event_info(msg.chat.id.0).await {
-                Ok(text) => message = text,
-                Err(err) => {
-                    let er = err.downcast_ref::<Err>().unwrap();
-                    message = er.to_string()
-                }
-            }
-
-            bot.send_message(msg.chat.id, message)
-                .parse_mode(MarkdownV2)
+        Err(err) => {
+            bot.send_message(msg.chat.id, user_message(&err))
                 .disable_notification(true)
                 .await?
         }
     };
-
     Ok(())
+}
+
+async fn command_handler(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
+    match cmd {
+        Command::Help => {
+            bot.send_message(msg.chat.id, Command::descriptions().to_string())
+                .disable_notification(true)
+                .await?;
+            Ok(())
+        }
+        Command::Start => {
+            let result = match SERVICE.register_new_club(msg.chat.id.0).await {
+                Ok(()) => {
+                    Ok("You're all set up! Now you can create event for your club".to_string())
+                }
+                Err(err)
+                    if err
+                        .downcast_ref::<tokio_postgres::Error>()
+                        .and_then(|e| e.code())
+                        == Some(&SqlState::UNIQUE_VIOLATION) =>
+                {
+                    Ok("You've already started a club".to_string())
+                }
+                Err(err) => Err(err),
+            };
+            reply(&bot, &msg, result).await
+        }
+        Command::Event(date) => {
+            let date = date.trim();
+            if date.is_empty() {
+                return reply(
+                    &bot,
+                    &msg,
+                    Ok("Please write a date in format -\n/event 2023.07.16 15:00".to_string()),
+                )
+                .await;
+            }
+
+            let result = SERVICE
+                .new_club_event(msg.chat.id.0, date)
+                .await
+                .map(|date| format!("New club event created on {}", date));
+            reply(&bot, &msg, result).await
+        }
+        Command::Suggest(suggestion) => {
+            let suggestion = suggestion.trim();
+            if suggestion.is_empty() {
+                return reply(
+                    &bot,
+                    &msg,
+                    Ok("Your suggestion is empty ;(\nFormat - /suggest smth".to_string()),
+                )
+                .await;
+            }
+
+            let result = match msg.from() {
+                Some(user) => SERVICE
+                    .new_member_suggestion(msg.chat.id.0, user.id.0, suggestion)
+                    .await
+                    .map(|()| format!("Got it. Your suggestion:\n{}", suggestion)),
+                None => Err(Err::UnknownSender.into()),
+            };
+            reply(&bot, &msg, result).await
+        }
+        Command::Insights => {
+            let result = SERVICE.toggle_with_insights(msg.chat.id.0).await;
+            reply(&bot, &msg, result).await
+        }
+        Command::StartClub => {
+            let result = SERVICE.start_active_event(msg.chat.id.0).await;
+            reply_markdown(&bot, &msg, result).await
+        }
+        Command::Achieve => {
+            let result = SERVICE
+                .achieve_active_event(msg.chat.id.0)
+                .await
+                .map(|date| format!("Ok, event on {} is achieved", date));
+            reply(&bot, &msg, result).await
+        }
+        Command::Pick => {
+            let result = SERVICE.pick_from_suggestions(msg.chat.id.0).await;
+            reply_markdown(&bot, &msg, result).await
+        }
+        Command::Current => {
+            let result = SERVICE.get_current_event_info(msg.chat.id.0).await;
+            reply_markdown(&bot, &msg, result).await
+        }
+    }
 }
 
 pub async fn run() {

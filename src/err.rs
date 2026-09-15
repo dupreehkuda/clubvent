@@ -1,6 +1,10 @@
 use std::error::Error;
 use std::fmt;
 
+/// Any error that can cross layer boundaries. Domain errors are `CustomError`,
+/// everything else (db, http) is reported to the user as a generic failure.
+pub type AppError = Box<dyn Error + Send + Sync>;
+
 #[derive(Debug)]
 pub enum CustomError {
     NoActiveEventFound,
@@ -10,6 +14,7 @@ pub enum CustomError {
     WrongDateFormat,
     EventInPast,
     EventWithoutInsights,
+    UnknownSender,
 }
 
 impl fmt::Display for CustomError {
@@ -27,6 +32,9 @@ impl fmt::Display for CustomError {
                 f,
                 "Event was configured without insights, no need to start it"
             ),
+            Self::UnknownSender => {
+                write!(f, "Can't tell who sent this, suggest from your own account")
+            }
         }
     }
 }
